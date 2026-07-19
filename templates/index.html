@@ -1,0 +1,214 @@
+{% extends "_base.html" %}
+
+<head>
+	{% block title %}
+	<title>9M2PJU DX Cluster Dashboard</title>
+	{% endblock %}
+	{% block head %}
+	{{ super() }}
+	{% endblock %}				
+</head>
+{% block titles %}
+<!-- ===== HERO HEADER ===== -->
+<div class="hero-header">
+    <!-- Left: Callsign badge + status -->
+    <div class="hero-brand">
+        <div class="hero-callsign">
+            <span class="hero-callsign-text">9M2PJU</span>
+            <span class="hero-live-dot"></span>
+        </div>
+        <div class="hero-subtitle">DX Cluster Dashboard</div>
+    </div>
+
+    <!-- Center: News ticker -->
+    <div class="hero-news">
+        <i class="bi bi-broadcast-pin hero-news-icon"></i>
+        <div class="hero-news-track">
+            <span class="hero-news-content">{{ dx_news | safe if dx_news else "LOADING DX RADIO NEWS..." }}</span>
+            <span class="hero-news-content">{{ dx_news | safe if dx_news else "LOADING DX RADIO NEWS..." }}</span>
+        </div>
+    </div>
+
+    <!-- Right: Clocks -->
+    <div class="hero-clocks">
+        <div class="hero-clock">
+            <span class="hero-clock-time" id="HeroClockUTC">--:--:--</span>
+            <span class="hero-clock-label">UTC</span>
+        </div>
+        <div class="hero-clock-divider"></div>
+        <div class="hero-clock">
+            <span class="hero-clock-time" id="HeroClockLocal">--:--:--</span>
+            <span class="hero-clock-label">LOCAL</span>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block filters %}
+<div class="dashboard-toolbar mx-2 my-2">
+	<div class="toolbar-group">
+		<button class="btn btn-emerald btn-sm toolbar-filter-button" type="button" aria-expanded="false"
+			aria-controls="collapseFilters" aria-label="Toggle filters" data-bs-toggle="collapse" data-bs-target="#collapseFilters">
+			<i class="bi bi-funnel-fill me-1"></i>
+			Filters
+			<span id="active-filter-count" class="filter-count ms-1">0</span>
+		</button>
+		<button class="btn btn-outline-light btn-sm quick-filter" type="button" data-quick-filter="hf">HF</button>
+		<button class="btn btn-outline-light btn-sm quick-filter" type="button" data-quick-filter="vhf">VHF+</button>
+		<button class="btn btn-outline-light btn-sm quick-filter" type="button" data-quick-filter="cw">CW</button>
+		<button class="btn btn-outline-light btn-sm quick-filter" type="button" data-quick-filter="phone">Phone</button>
+		<button class="btn btn-outline-light btn-sm quick-filter" type="button" data-quick-filter="digi">Digi</button>
+	</div>
+	<div class="toolbar-group toolbar-status">
+		<div id="ws-status" class="live-status live-status-pending" aria-live="polite">
+			<span class="live-dot"></span>
+			<span id="ws-status-text">Connecting</span>
+		</div>
+		<div class="form-check form-switch sound-switch mb-0">
+			<input class="form-check-input" type="checkbox" id="soundToggle">
+			<label class="form-check-label text-white small fw-bold" for="soundToggle">
+				<i class="bi bi-volume-up-fill"></i>
+			</label>
+		</div>
+		<div class="form-check form-switch sound-switch mb-0">
+			<input class="form-check-input" type="checkbox" id="toastToggle">
+			<label class="form-check-label text-white small fw-bold" for="toastToggle">
+				<i class="bi bi-bell-fill"></i>
+			</label>
+		</div>
+	</div>
+</div>
+
+<div class="row mx-auto">
+	<div class="col-md-auto ml-2 collapse rounded-sm shadow mb-5 glass-card p-4 filter-panel" id="collapseFilters">
+		<form method="POST" id="form-filters" enctype="application/x-www-form-urlencoded">
+			<input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+			
+			<div class="mb-4">
+				<h6 class="text-emerald extra-small text-uppercase tracking-wider mb-3 fw-bold"><i class="bi bi-bullseye me-2"></i>Target Filtering</h6>
+				<label class="text-white small fw-bold mb-1">Target Callsigns</label>
+				<select id="dxcalls" data-placeholder="e.g. 9M2PJU" autocomplete="off" multiple>
+					{% for item in dx_calls %}
+					<option>{{item}}</option>
+					{% endfor %}
+				</select>
+			</div>
+
+			<div class="mb-4">
+				<h6 class="text-emerald extra-small text-uppercase tracking-wider mb-3 fw-bold"><i class="bi bi-reception-3 me-2"></i>Spectral Control</h6>
+				<label class="text-white small fw-bold mb-1">Amateur Bands</label>
+				<select class="form-select bg-black text-white border-emerald-o25" id="band" size="8" multiple>
+					{% for dict_item in bands['bands']|reverse %}
+					<option selected value="{{dict_item['id']}}">{{dict_item["id"]}}</option>
+					{% endfor %}
+				</select>
+				
+				<label class="text-white small fw-bold mt-3 mb-1">Transmission Mode</label>
+				<select class="form-select bg-black text-white border-emerald-o25" id="mode" size="3" multiple>
+					<option selected value="cw">CW</option>
+					<option selected value="phone">PHONE</option>
+					<option selected value="digi">DIGI</option>
+				</select>
+
+				<div class="d-flex flex-column gap-2 mt-3">
+					<div class="form-check form-switch">
+						<input class="form-check-input" type="checkbox" id="exclft8">
+						<label class="form-check-label text-white small" for="exclft8">Exclude FT8</label>
+					</div>
+					<div class="form-check form-switch">
+						<input class="form-check-input" type="checkbox" id="exclft4">
+						<label class="form-check-label text-white small" for="exclft4">Exclude FT4</label>
+					</div>
+				</div>
+			</div>
+
+			<div class="mb-4">
+				<h6 class="text-emerald extra-small text-uppercase tracking-wider mb-3 fw-bold"><i class="bi bi-globe me-2"></i>Geographic Origin</h6>
+				<div class="row g-2">
+					<div class="col-6">
+						<label class="text-white extra-small mb-1 font-weight-bold">Spotter (DE)</label>
+						<select class="form-select bg-black text-white border-emerald-o25" id="de_re" size="5" multiple>
+							{% for dict_item in continents['continents'] %}
+							<option selected value="{{dict_item['id']}}">{{dict_item["id"]}}</option>
+							{% endfor %}
+						</select>
+					</div>
+					<div class="col-6">
+						<label class="text-white extra-small mb-1 font-weight-bold">Target (DX)</label>
+						<select class="form-select bg-black text-white border-emerald-o25" id="dx_re" size="5" multiple>
+							{% for dict_item in continents['continents'] %}
+							<option selected value="{{dict_item['id']}}">{{dict_item["id"]}}</option>
+							{% endfor %}
+						</select>
+					</div>
+				</div>
+			</div>
+
+			{% if enable_cq_filter == "Y" %}
+			<div class="mb-4">
+				<h6 class="text-emerald extra-small text-uppercase tracking-wider mb-3 fw-bold"><i class="bi bi-map me-2"></i>CQ Zone Control</h6>
+				<label class="text-white extra-small mb-1 font-weight-bold">CQ De Zone</label>
+				<select class="form-select bg-black text-white border-emerald-o25 mb-2" id="cqdeInput">
+					<option value="" selected>All Zones</option>
+					{% for i in range(1, 41) %}
+					<option value="{{i}}">{{i}}</option>
+					{% endfor %}
+				</select>
+				<label class="text-white extra-small mb-1 font-weight-bold">CQ Dx Zone</label>
+				<select class="form-select bg-black text-white border-emerald-o25" id="cqdxInput">
+					<option value="" selected>All Zones</option>
+					{% for i in range(1, 41) %}
+					<option value="{{i}}">{{i}}</option>
+					{% endfor %}
+				</select>
+			</div>
+			{% endif %}
+
+			<div class="filter-actions d-flex flex-column gap-3 mt-5">
+				<button type="submit" class="btn btn-emerald w-100 fw-bold py-2 shadow-sm">
+					<i class="bi bi-search me-2"></i> Apply Filters
+				</button>
+				<button type="Reset" class="btn btn-outline-secondary w-100 text-uppercase extra-small tracking-wider">
+					Reset
+				</button>
+			</div>
+		</form>
+	</div>
+	{% endblock filters %}
+	<!-- table -->
+	{% block contents %}
+	<div class="col">
+		<table id="spotsTable" class="table table-sm text-responsive table-borderless table-hover">
+			<thead>
+				<tr>
+					<th scope="col" style="font-family: 'Outfit'; letter-spacing: 1px;"><i class="bi bi-chevron-bar-right me-1"></i>DE</th>
+					<th scope="col" style="font-family: 'Outfit'; letter-spacing: 1px;"><i class="bi bi-radar me-1"></i>FREQ</th>
+					<th scope="col" style="font-family: 'Outfit'; letter-spacing: 1px;"><i class="bi bi-chevron-bar-left me-1"></i>DX</th>
+					<th scope="col"></th>
+					<th scope="col" class="d-none d-lg-table-cell d-xl-table-cell" style="font-family: 'Outfit'; letter-spacing: 1px;"><i class="bi bi-globe-americas me-1"></i>QTH</th>
+					<th scope="col" class="d-none d-lg-table-cell d-xl-table-cell" style="font-family: 'Outfit'; letter-spacing: 1px;"><i class="bi bi-chat-dots-fill me-1"></i>INFO</th>
+					<th scope="col" style="font-family: 'Outfit'; letter-spacing: 1px;"><i class="bi bi-clock-history me-1"></i>UTC</th>
+				</tr>
+			</thead>
+			<tbody id="bodyspot">
+			</tbody>
+		</table>
+	</div>
+</div>
+{% endblock contents %}
+{% block app_data %}
+{{ super() }}
+
+var timer_interval_json = {{timer_interval}};
+var my_adxo_events_json='{{ adxo_events|tojson|safe }}'; 
+var continents_cq={{continents["continents"]|tojson|safe}};
+var band_frequencies={{bands["bands"]|tojson|safe}};
+
+{% endblock app_data %}
+
+{% block app_scripts %}
+{{ super() }}
+<script defer src="/static/js/dev/callsign_search.js?v={{ config['VERSION'] }}"></script>
+{% endblock %}
+{% block inline_scripts %}
+<script defer src="/static/js/dev/index_inline.js?v={{ config['VERSION'] }}"></script>
+{% endblock %}

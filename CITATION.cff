@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+title: Spiderweb
+message: 'If you use this software, please cite it as below.'
+type: software
+authors:
+  - given-names: Corrado
+    family-names: Gerbaldo
+    email: corrado.gerbaldo@gmail.com
+repository-code: 'https://github.com/9M2PJU/9M2PJU-Web-DX-Cluster'
+url: 'https://dx.hamradio.my'
+abstract: Ham radio cluster web viewer for DxSpider (9M2PJU fork)
+keywords:
+  - iu1bow
+  - 9m2pju
+  - mysql
+  - python
+  - radio
+  - bootstrap
+  - flask
+  - plots
+  - eCharts
+  - dx
+  - ham-radio
+  - dx-cluster
+  - dxcluster
+  - spiderweb
+license: AGPL-3.0
+version: v2.10.0-9M2PJU
+date-released: 2026-07-19

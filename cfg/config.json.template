@@ -1,0 +1,26 @@
+{
+        "mysql":{
+            "host":"localhost",
+            "user":"foo",
+            "passwd":"bar",
+            "db":"dxcluster"
+        },
+        "timer":{
+                        "interval":30000
+        },
+	"mycallsign":"XXXXXX",
+    "mail":"foo@bar.com",
+    "enable_cq_filter":"n",
+    "telnet": {
+        "telnet_host": "mysite",
+        "telnet_port": "7300",
+        "telnet_user": "myuser",
+        "telnet_password": ""
+    },
+        "menu": {
+          "menu_list": [
+            {"label":"Charts & stats", "link": "/plots.html", "external": false},
+            {"label":"Propagation", "link": "/propagation.html", "external": false}
+            ]
+        }
+}

@@ -1,0 +1,762 @@
+__author__ = "IU1BOW - Corrado"
+import flask
+from flask import request, render_template, session
+from flask_socketio import SocketIO, emit
+from flask_wtf.csrf import CSRFProtect
+from flask_minify import minify
+from flask_compress import Compress
+import datetime
+import secrets
+import orjson
+import threading
+import logging
+import logging.config
+import asyncio
+import requests
+import xmltodict
+import time
+import os
+import ipaddress
+from html import escape
+from lib.dxtelnet import fetch_who_and_version
+from lib.adxo import get_adxo_events
+from lib.qry import query_manager
+from lib.cty import prefix_table
+from lib.plot_data_provider import ContinentsBandsProvider, SpotsPerMounthProvider, SpotsTrend, HourBand, WorldDxSpotsLive
+from lib.qry_builder import query_build, query_build_callsign, query_build_callsing_list
+
+TIMER_VISIT = 1000
+TIMER_ADXO = 12 * 3600
+TIMER_WHO = 7 * 60
+TIMER_NEWS = 30 * 60 # 30 minutes for news
+
+logging.config.fileConfig("cfg/webapp_log_config.ini", disable_existing_loggers=True)
+logger = logging.getLogger(__name__)
+logger.info("Starting SPIDERWEB")
+
+app = flask.Flask(__name__)
+
+app.config["SECRET_KEY"] = secrets.token_hex(16)
+app.config.update(
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+)
+version_file = open("cfg/version.txt", "r")
+app.config["VERSION"] = version_file.read().strip()
+version_file.close
+logger.info("Version:"+app.config["VERSION"] )
+
+inline_script_nonce = ""
+
+csrf = CSRFProtect(app)
+app.config["COMPRESS_ALGORITHM"] = 'gzip'
+app.config["COMPRESS_LEVEL"] = 9
+app.config["COMPRESS_MIN_SIZE"] = 500 # Only compress responses > 500 bytes
+Compress(app)
+socketio_origins = os.environ.get("SPIDERWEB_SOCKETIO_ORIGINS", "").strip()
+socketio = SocketIO(
+    app,
+    async_mode='eventlet',
+    cors_allowed_origins=socketio_origins.split(",") if socketio_origins else None,
+)
+
+def orjson_response(data):
+    """
+    Helper to return a flask Response with orjson serialized data.
+    Includes support for NumPy types (used by Pandas providers) and 
+    non-string dictionary keys.
+    """
+    try:
+        # OPT_SERIALIZE_NUMPY: Handles numpy.int64, float64, etc. from Pandas
+        # OPT_NON_STR_KEYS: Handles integer keys in dictionaries
+        serialized_data = orjson.dumps(
+            data, 
+            option=orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS
+        )
+        return flask.Response(serialized_data, mimetype='application/json')
+    except Exception as e:
+        logger.error(f"Serialization error: {e}")
+        # Return a meaningful error to aid debugging
+        return flask.jsonify({"error": str(e)}), 500
+
+logger.debug(app.config)
+
+if app.config["DEBUG"]:
+    minify(app=app, html=False, js=False, cssless=False)
+else:
+    minify(app=app, html=True, js=True, cssless=False)
+
+#removing whitespace from jinja2 html rendered
+app.jinja_env.trim_blocks = True
+app.jinja_env.lstrip_blocks = True    
+
+
+# load config file
+with open("cfg/config.json", "rb") as json_data_file:
+    cfg = orjson.loads(json_data_file.read())
+
+logger.debug("CFG:")
+logger.debug(cfg)
+# load bands file
+with open("cfg/bands.json", "rb") as json_bands:
+    band_frequencies = orjson.loads(json_bands.read())
+
+# load mode file
+with open("cfg/modes.json", "rb") as json_modes:
+    modes_frequencies = orjson.loads(json_modes.read())
+
+# load continents-cq file
+with open("cfg/continents.json", "rb") as json_continents:
+    continents_cq = orjson.loads(json_continents.read())
+
+#load visitour counter
+visits_file_path = "data/visits.json"
+try:
+    # Load the visits data from the file
+    with open(visits_file_path, "rb") as json_visitors:
+        visits = orjson.loads(json_visitors.read())
+except FileNotFoundError:
+    # If the file does not exist, create an empty visits dictionary
+    visits = {}
+
+except orjson.JSONDecodeError:
+    # If the file is not a valid json file
+    logger.warning("No valid data in visit json")
+    logger.warning("reset and creation of a new:" + visits_file_path )
+    visits = {}
+
+#save visits
+def save_visits():
+    with open(visits_file_path, "wb") as json_file:
+        json_file.write(orjson.dumps(visits))
+    logger.info('visit saved on: '+ visits_file_path)
+
+# DX News Cache
+dx_news_cache = "Welcome to 9M2PJU DX Cluster Dashboard. Loading latest ham news..."
+last_news_fetch = 0
+news_lock = threading.Lock()
+
+def fetch_dx_news(force=False):
+    global dx_news_cache, last_news_fetch
+    
+    with news_lock:
+        if not force and time.time() - last_news_fetch < TIMER_NEWS and dx_news_cache:
+            return dx_news_cache
+        
+        try:
+            url = "https://dxnews.com/rss.xml"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = xmltodict.parse(response.content)
+                items = data.get('rss', {}).get('channel', {}).get('item', [])
+                
+                news_items = []
+                # Fix for XML parsing: ensure items is a list
+                if isinstance(items, dict):
+                    items = [items]
+                    
+                for item in items[:15]:
+                    title = item.get('title', 'No Title')
+                    # Remove redundant " FROM DXnews.com" suffix if present
+                    title = title.replace(" FROM DXnews.com", "").replace(" from dxnews.com", "").strip()
+                    link = item.get('link', '#')
+                    news_items.append(
+                        "<a href='{}' target='_blank' rel='noopener noreferrer' "
+                        "class='text-emerald text-decoration-none hover-glow'>{}</a>".format(
+                            escape(link, quote=True),
+                            escape(title),
+                        )
+                    )
+                
+                if news_items:
+                    dx_news_cache = " • ".join(news_items)
+                    last_news_fetch = time.time()
+                    logger.info("DX News fetched successfully")
+        except Exception as e:
+            logger.error(f"Error fetching DX News: {e}")
+        
+    return dx_news_cache
+
+def background_news_task():
+    """Background task to fetch news periodically."""
+    # Initial fetch
+    fetch_dx_news(force=True)
+    while True:
+        time.sleep(TIMER_NEWS)
+        fetch_dx_news(force=True)
+
+# ADXO Events Cache
+adxo_cache = []
+last_adxo_fetch = 0
+adxo_lock = threading.Lock()
+
+def fetch_adxo_events(force=False):
+    global adxo_cache, last_adxo_fetch
+    
+    with adxo_lock:
+        if not force and time.time() - last_adxo_fetch < TIMER_ADXO and adxo_cache:
+            return adxo_cache
+        
+        try:
+            from lib.adxo import get_adxo_events
+            events = get_adxo_events()
+            if events:
+                adxo_cache = events
+                last_adxo_fetch = time.time()
+                logger.info("ADXO events fetched successfully")
+        except Exception as e:
+            logger.error(f"Error fetching ADXO events: {e}")
+            
+    return adxo_cache
+
+def background_adxo_task():
+    """Background task to fetch ADXO events periodically."""
+    # Initial fetch
+    fetch_adxo_events(force=True)
+    while True:
+        time.sleep(TIMER_ADXO)
+        fetch_adxo_events(force=True)
+
+# saving scheduled
+def schedule_save():
+    save_visits()
+    threading.Timer(TIMER_VISIT, schedule_save).start()
+
+
+# read and set default for enabling cq filter
+if cfg.get("enable_cq_filter"):
+    enable_cq_filter = cfg["enable_cq_filter"].upper()
+else:
+    enable_cq_filter = "N"
+
+# define country table for search info on callsigns
+pfxt = prefix_table()
+
+# create object query manager
+qm = query_manager()
+
+# Cache for DX calls to avoid expensive DB queries
+dx_calls_cache = {
+    "data": [],
+    "last_updated": 0
+}
+DX_CALLS_CACHE_TTL = 3600  # 1 hour (Optimized for 8GB RPi4)
+visitor_continent_cache = {}
+VISITOR_CONTINENT_CACHE_TTL = 24 * 3600
+CONTINENT_LABELS = {
+    "AF": "Africa",
+    "AN": "Antarctica",
+    "AS": "Asia",
+    "EU": "Europe",
+    "NA": "North America",
+    "OC": "Oceania",
+    "SA": "South America",
+}
+
+def normalize_continent_code(value):
+    code = (value or "").strip().upper()
+    return code if code in CONTINENT_LABELS else ""
+
+def request_client_ip():
+    header_value = (
+        request.headers.get("CF-Connecting-IP")
+        or request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For")
+        or request.remote_addr
+        or ""
+    )
+    return header_value.split(",")[0].strip()
+
+def is_public_ip(ip_value):
+    try:
+        ip_obj = ipaddress.ip_address(ip_value)
+    except ValueError:
+        return False
+    return not (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+    )
+
+def detect_visitor_continent():
+    header_code = normalize_continent_code(
+        request.headers.get("CF-IPContinent")
+        or request.headers.get("X-Vercel-IP-Continent")
+        or request.headers.get("X-Continent-Code")
+    )
+    if header_code:
+        return header_code
+
+    if os.environ.get("SPIDERWEB_IP_GEOLOOKUP", "1").lower() in ("0", "false", "no"):
+        return ""
+
+    client_ip = request_client_ip()
+    cache_key = client_ip or "server-public-ip"
+    cached = visitor_continent_cache.get(cache_key)
+    if cached and time.time() - cached["last_updated"] < VISITOR_CONTINENT_CACHE_TTL:
+        return cached["continent"]
+
+    lookup_url = (
+        f"https://ipapi.co/{client_ip}/json/"
+        if is_public_ip(client_ip)
+        else "https://ipapi.co/json/"
+    )
+    try:
+        response = requests.get(lookup_url, timeout=2)
+        if response.status_code != 200:
+            return ""
+        continent = normalize_continent_code(response.json().get("continent_code"))
+        if continent:
+            visitor_continent_cache[cache_key] = {
+                "continent": continent,
+                "last_updated": time.time(),
+            }
+        return continent
+    except Exception as e:
+        logger.debug(f"Visitor continent lookup failed: {e}")
+        return ""
+
+# the main query to show spots
+# it gets url parameter in order to apply the build the right query
+# and apply the filter required. It returns a json with the spots
+def spotquery(parameters):
+    try:
+        if 'callsign' in parameters:
+            logger.debug('search callsign')
+            query_string = query_build_callsign(logger,parameters['callsign'] )
+        else:
+            logger.debug('search eith other filters')
+            query_string = query_build(logger,parameters,band_frequencies,modes_frequencies,continents_cq,enable_cq_filter)
+        data, row_headers = qm.qry(query_string)
+
+        logger.debug("query done")
+        logger.debug(data)
+
+        if data is None or len(data) == 0:
+            logger.warning("no data found")
+
+        payload = []
+        
+        # Performance: Cache for prefix table lookups within this request
+        prefix_cache = {}
+        
+        for result in data:
+            # create dictionary from recorset
+            main_result = dict(zip(row_headers, result))
+            
+            # find the country in prefix table (using request-local cache)
+            dx_call = main_result["dx"]
+            if dx_call not in prefix_cache:
+                prefix_cache[dx_call] = pfxt.find(dx_call)
+            
+            search_prefix = prefix_cache[dx_call]
+            
+            # merge recordset and contry prefix
+            main_result["country"] = search_prefix["country"]
+            main_result["iso"] = search_prefix["iso"]
+
+            payload.append({**main_result})
+
+        return payload
+    except Exception as e:
+        logger.error(e)
+
+# create data provider for charts
+heatmap_cbp = ContinentsBandsProvider(logger, qm, continents_cq, band_frequencies)
+bar_graph_spm = SpotsPerMounthProvider(logger, qm)
+line_graph_st = SpotsTrend(logger, qm)
+bubble_graph_hb = HourBand(logger, qm, band_frequencies)
+geo_graph_wdsl = WorldDxSpotsLive(logger, qm, pfxt)
+
+# Find who is connected to the cluster with DXSpider version (using a scheduled telnet connection)
+whoj = {"data": [], "version": "Unknown", "last_updated": "No data"}
+# Redundant import removed
+def who_is_connected():
+    global whoj
+    host = cfg["telnet"]["telnet_host"]
+    port = cfg["telnet"]["telnet_port"]
+    user = cfg["telnet"]["telnet_user"]
+    password = cfg["telnet"]["telnet_password"]
+
+    logger.info(f"Refreshing WHO list and DXSpider version from: {host}:{port}")
+
+    try:
+        parsed_data, dxspider_version = asyncio.run(fetch_who_and_version(host, port, user, password))
+
+        # Filter out the telnet_user from the parsed_data
+        if parsed_data:
+            whoj["data"] = [entry for entry in parsed_data if entry.get("callsign") != user]         
+        else:
+            logger.warning("WHO response was empty.")
+            whoj["data"] = []
+
+        # Check if version is valid
+        if dxspider_version and dxspider_version != "Unknown":
+            whoj["version"] = dxspider_version
+        else:
+            logger.warning("DXSpider version not found.")
+            whoj["version"] = "Unknown"
+
+        # Update last refresh time
+        whoj["last_updated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%d-%b-%Y %H:%MZ")
+
+        logger.debug(f"WHO data: {whoj['data']}")
+        logger.debug(f"DXSpider version: {whoj['version']}")
+        logger.debug(f"Last updated: {whoj['last_updated']}")
+
+    except Exception as e:
+        logger.error(f"Error connecting to host {host}:{port} - {e}")
+        whoj["data"] = []
+        whoj["version"] = "Error fetching version"
+        whoj["last_updated"] = "Connection error"
+
+    finally:
+        threading.Timer(TIMER_WHO, who_is_connected).start()
+        logger.debug(f"Final WHO data: {whoj}")
+
+# Calculate nonce token used in inline script and in csp "script-src" header
+def get_nonce():
+    global inline_script_nonce
+    inline_script_nonce = secrets.token_hex(16)
+    return inline_script_nonce
+
+#check if it is a unique visitor
+def visitor_count():
+#   user_ip =request.environ.get('HTTP_X_REAL_IP', request.remote_addr)
+    user_ip = request.environ.get('HTTP_X_FORWARDED_FOR')or request.environ.get('HTTP_X_REAL_IP') or request.remote_addr
+    if user_ip not in visits:
+        visits[user_ip] = 1
+    else:
+        visits[user_ip] += 1
+
+# WEB SOCKETS BACKGROUND TASK
+last_broadcast_rowid = 0
+
+def background_spot_poll():
+    global last_broadcast_rowid
+    logger.info("Starting background spot poll for WebSockets")
+    
+    # Initialize last_broadcast_rowid with the current latest rowid in DB
+    try:
+        res, _h = qm.qry("SELECT MAX(rowid) FROM spot")
+        if res and res[0][0]:
+            last_broadcast_rowid = res[0][0]
+            logger.info(f"Initialized last_broadcast_rowid to {last_broadcast_rowid}")
+    except Exception as e:
+        logger.error(f"Error initializing WebSocket rowid: {e}")
+
+    while True:
+        socketio.sleep(5) # Check every 5 seconds for new data (Optimized for RPi4)
+        try:
+            # Query for NEW spots only (Explicitly mapped to match frontend expectations)
+            qs = f"SELECT rowid, spotter AS de, freq, spotcall AS dx, comment AS comm, time, spotdxcc FROM spot WHERE rowid > {last_broadcast_rowid} ORDER BY rowid DESC LIMIT 50"
+            new_data, headers = qm.qry(qs)
+            
+            if new_data:
+                payload = []
+                prefix_cache = {}
+                for result in new_data:
+                    main_result = dict(zip(headers, result))
+                    dx_call = main_result["dx"]
+                    if dx_call not in prefix_cache:
+                        prefix_cache[dx_call] = pfxt.find(dx_call)
+                    
+                    search_prefix = prefix_cache[dx_call]
+                    main_result["country"] = search_prefix["country"]
+                    main_result["iso"] = search_prefix["iso"]
+                    payload.append(main_result)
+                
+                # Update last rowid to the newest one found
+                last_broadcast_rowid = max([r[0] for r in new_data])
+                
+                # Broadcast to all clients
+                logger.info(f"Broadcasting {len(payload)} new spots via WebSocket")
+                socketio.emit('new_spots', {'spots': payload})
+                
+        except Exception as e:
+            logger.error(f"WebSocket background error: {e}")
+
+@socketio.on('connect')
+def handle_connect():
+    logger.info("Client connected to WebSocket")
+
+background_services_started = False
+background_services_lock = threading.Lock()
+
+def start_background_services():
+    global background_services_started
+
+    with background_services_lock:
+        if background_services_started:
+            return
+        background_services_started = True
+
+        threading.Thread(target=background_news_task, daemon=True).start()
+        threading.Thread(target=background_adxo_task, daemon=True).start()
+        schedule_save()
+        who_is_connected()
+        socketio.start_background_task(background_spot_poll)
+        logger.info("Background services started")
+
+# ROUTINGS
+@app.route("/spotlist", methods=["POST"])
+@csrf.exempt
+def spotlist():
+    logger.debug(request.json)
+    return orjson_response(spotquery(request.json))
+
+@app.route("/visitor_continent", methods=["GET"])
+def visitor_continent():
+    continent = detect_visitor_continent()
+    return orjson_response({
+        "continent": continent,
+        "description": CONTINENT_LABELS.get(continent, ""),
+    })
+   
+@app.route("/", methods=["GET"])
+@app.route("/index.html", methods=["GET"])
+def spots():
+    
+    visitor_count()
+
+    response = flask.Response(
+        render_template(
+            "index.html",
+            inline_script_nonce=get_nonce(),
+            mycallsign=cfg["mycallsign"],
+            telnet=cfg["telnet"]["telnet_host"]+":"+cfg["telnet"]["telnet_port"],
+            mail=cfg["mail"],
+            menu_list=cfg["menu"]["menu_list"],
+            visits=len(visits),            
+            enable_cq_filter=enable_cq_filter,
+            timer_interval=cfg["timer"]["interval"],
+            adxo_events=fetch_adxo_events(),
+            continents=continents_cq,
+            bands=band_frequencies,
+            dx_calls=get_dx_calls(),
+            dx_news=fetch_dx_news(),
+        )
+    )
+    return response
+
+
+#Show all dx spot callsigns 
+def get_dx_calls():
+    
+    current_time = time.time()
+
+    if dx_calls_cache["data"] and (current_time - dx_calls_cache["last_updated"] < DX_CALLS_CACHE_TTL):
+        logger.debug("Returning cached DX calls")
+        return dx_calls_cache["data"]
+
+    try:
+        logger.info("Refreshing DX calls cache (heavy query)")
+        query_string = query_build_callsing_list()
+        data, row_headers = qm.qry(query_string)
+
+        payload = []
+        for result in data:
+            main_result = dict(zip(row_headers, result))
+            payload.append(main_result["dx"])
+        
+        dx_calls_cache["data"] = payload
+        dx_calls_cache["last_updated"] = current_time
+        
+        logger.debug("last DX Callsigns:")
+        logger.debug(payload)
+        return payload
+    
+    except Exception as e:
+        logger.error(f"Error refreshing DX calls: {e}")
+        return dx_calls_cache["data"] # Return stale data if query fails
+    
+
+
+@app.route("/service-worker.js", methods=["GET"])
+def sw():
+    return app.send_static_file("pwa/service-worker.js")
+
+@app.route("/offline.html")
+def root():
+    return app.send_static_file("html/offline.html")
+
+#used for plots
+@app.route("/world.json")  
+def world_data():
+    return app.send_static_file("data/world.json")
+
+@app.route("/plots.html")
+def plots():
+    global whoj
+    response = flask.Response(
+        render_template(
+            "plots.html",
+            inline_script_nonce=get_nonce(),
+            mycallsign=cfg["mycallsign"],
+            telnet=f"{cfg['telnet']['telnet_host']}:{cfg['telnet']['telnet_port']}",
+            mail=cfg["mail"],
+            menu_list=cfg["menu"]["menu_list"],
+            visits=len(visits),
+            who=whoj.get("data", []),
+            last_updated=whoj.get("last_updated", "No data"),
+            dxspider_version=whoj.get("version", "Unknown"),
+            continents=continents_cq,
+            bands=band_frequencies,
+            dx_news=fetch_dx_news(),
+        )
+    )
+    return response
+
+@app.route("/propagation.html")
+def propagation():
+
+    #get solar data in XML format and convert to json
+    solar_data={}
+    url = "https://www.hamqsl.com/solarxml.php"
+    try:
+        logger.debug("connection to: " + url)
+        req = requests.get(url, timeout=8)
+        logger.debug(req.content)
+        solar_data = xmltodict.parse(req.content)    
+        logger.debug(solar_data)
+
+    except Exception as e1:
+        logger.error(e1)
+
+    response = flask.Response(
+        render_template(
+            "propagation.html",
+            inline_script_nonce=get_nonce(),          
+            mycallsign=cfg["mycallsign"],
+            telnet=cfg["telnet"]["telnet_host"]+":"+cfg["telnet"]["telnet_port"],
+            mail=cfg["mail"],
+            menu_list=cfg["menu"]["menu_list"],
+            visits=len(visits),                     
+            solar_data=solar_data,
+            dx_news=fetch_dx_news(),
+        )
+    )
+
+    #response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
+
+@app.route("/sitemap.xml")
+def sitemap():
+    return app.send_static_file("sitemap.xml")
+
+
+@app.route("/callsign.html", methods=["GET"])
+def callsign():
+
+    callsign = request.args.get("c")
+    response = flask.Response(
+        render_template(
+            "callsign.html",
+            inline_script_nonce=get_nonce(),              
+            mycallsign=cfg["mycallsign"],
+            telnet=cfg["telnet"]["telnet_host"]+":"+cfg["telnet"]["telnet_port"],
+            mail=cfg["mail"],
+            menu_list=cfg["menu"]["menu_list"],
+            visits=len(visits),                     
+            timer_interval=cfg["timer"]["interval"],
+            callsign=callsign,
+            adxo_events=fetch_adxo_events(),
+            continents=continents_cq,
+            bands=band_frequencies,
+            dx_news=fetch_dx_news(),
+        )
+    )
+    return response
+
+
+# API that search a callsign and return all informations about that
+@app.route("/callsign", methods=["GET"])
+def find_callsign():
+    callsign = request.args.get("c")
+    response = pfxt.find(callsign)
+    if response is None:
+        response = flask.Response(status=204)
+    return response
+
+
+@app.route("/plot_get_heatmap_data", methods=["POST"])
+@csrf.exempt
+def get_heatmap_data():
+    continent = request.json['continent']
+    logger.debug(request.get_json())
+    return orjson_response(heatmap_cbp.get_data(continent))
+
+
+@app.route("/plot_get_dx_spots_per_month", methods=["POST"])
+@csrf.exempt
+def get_dx_spots_per_month():
+    return orjson_response(bar_graph_spm.get_data())
+
+
+@app.route("/plot_get_dx_spots_trend", methods=["POST"])
+@csrf.exempt
+def get_dx_spots_trend():
+    return orjson_response(line_graph_st.get_data())
+
+
+@app.route("/plot_get_hour_band", methods=["POST"])
+@csrf.exempt
+def get_dx_hour_band():
+    return orjson_response(bubble_graph_hb.get_data())
+
+
+@app.route("/plot_get_world_dx_spots_live", methods=["POST"])
+@csrf.exempt
+def get_world_dx_spots_live():
+    return orjson_response(geo_graph_wdsl.get_data())
+
+@app.route("/csp-reports", methods=['POST'])
+@csrf.exempt
+def csp_reports():
+    report_data = request.get_data(as_text=True)
+    logger.warning("CSP Report:")
+    logger.warning(report_data)
+    response=flask.Response(status=204)
+    return response
+
+@app.after_request
+def add_security_headers(resp):
+    resp.headers["Strict-Transport-Security"] = "max-age=1000"
+    resp.headers["X-Xss-Protection"] = "1; mode=block"
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Cache-Control"] = "public, no-cache, must-revalidate, max-age=900"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["ETag"] = app.config["VERSION"]
+    
+    # Construct CSP with correctly typed nonce and allowed domains
+    csp = (
+        "default-src 'self'; "
+        f"script-src 'self' cdnjs.cloudflare.com cdn.jsdelivr.net 'nonce-{inline_script_nonce}'; "
+        "style-src 'self' 'unsafe-inline' cdnjs.cloudflare.com cdn.jsdelivr.net fonts.googleapis.com; "
+        "object-src 'none'; base-uri 'self'; "
+        "connect-src 'self' ws: wss: cdn.jsdelivr.net cdnjs.cloudflare.com sidc.be prop.kc2g.com www.hamqsl.com; "
+        "font-src 'self' cdn.jsdelivr.net fonts.gstatic.com; "
+        "frame-src 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'; "
+        "img-src 'self' data: cdnjs.cloudflare.com sidc.be prop.kc2g.com; "
+        "manifest-src 'self'; "
+        "media-src 'self' data:; "
+        "worker-src 'self'; "
+        "report-uri /csp-reports;"
+    )
+    resp.headers["Content-Security-Policy"] = csp
+    return resp
+   
+    #report-to csp-endpoint;\
+    #script-src 'self' cdnjs.cloudflare.com cdn.jsdelivr.net 'nonce-sedfGFG32xs';\
+    #script-src 'self' cdnjs.cloudflare.com cdn.jsdelivr.net 'nonce-"+inline_script_nonce+"';\
+if __name__ == "__main__":
+    start_background_services()
+    socketio.run(app, host="0.0.0.0", port=5000, log_output=True)

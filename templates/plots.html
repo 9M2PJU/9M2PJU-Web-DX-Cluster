@@ -1,0 +1,176 @@
+{% extends "_base.html" %}
+
+<head>
+    {% block title %}
+    <title>9M2PJU DX Cluster Dashboard: Charts & Stats</title>
+    {% endblock %}
+    {% block head %}
+    {{ super() }}
+    {% endblock %}
+</head>
+
+{% block titles %}
+<div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center mb-1 gap-3">
+    <div>
+        <h3 class="text-white mb-0" style="font-family: 'Outfit'; font-weight: 800;">CHARTS & STATS</h3>
+        <p class="text-light small mb-0">System performance and propagation trends</p>
+    </div>
+    
+    <div class="hero-clock-container rounded px-3 py-1 border border-emerald-o25 d-inline-block shadow-lg">
+        <div class="d-flex align-items-center justify-content-center justify-content-md-end gap-3">
+            <div class="text-center">
+                <div id="HeroClockUTC" class="h5 fw-bold text-white mb-0 mono">--:--:--</div>
+                <span class="text-emerald extra-small fw-bold text-uppercase" style="font-size: 0.6rem;">UTC</span>
+            </div>
+            <div class="vr bg-white-10" style="height: 20px; opacity: 0.3;"></div>
+            <div class="text-center">
+                <div id="HeroClockLocal" class="h5 fw-bold text-white mb-0 mono">--:--:--</div>
+                <span class="text-blue extra-small fw-bold text-uppercase" style="font-size: 0.6rem;">LOCAL</span>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block filters %}
+{% endblock %}
+
+{% block contents %}
+<div id="dashboard" class="d-flex flex-wrap justify-content-around">
+    <!-- Band Activity Chart -->
+    <div class="mb-5 rounded glass-card spider_chart" id="form-band_activity">
+        <div class="d-flex flex-column">
+            <form method="POST" id="form-continents" enctype="application/x-www-form-urlencoded">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" />
+                <div class="container">
+                    Your continent is:
+                    <select class="form-select flex-shrink" aria-label="continent" id="continentInput">
+                        {% for dict_item in continents['continents'] %}
+                        <option value="{{ dict_item['id'] }}">{{ dict_item["description"] }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </form>
+            <div id="chart-band_activity"></div>
+        </div>
+        <small><sup id="txt_continent"></sup></small>
+    </div>
+
+    <!-- World DX Spots Live Chart -->
+    <div class="mb-5 bg-dark rounded glass-card spider_chart" id="chart-world_dx_spots_live"></div>
+
+    <!-- Hour Band Chart -->
+    <div class="mb-5 bg-dark rounded glass-card spider_chart" id="chart-hour_band"></div>
+
+    <!-- Propagation Image -->
+    <div class="mb-5 glass-card spider_chart d-flex flex-column align-items-center justify-content-center p-3">
+        <h5 class="text-white align-self-start mb-3" style="font-family: 'Outfit'; font-weight: 800; letter-spacing: 1px;">SOLAR PROPAGATION TREND</h5>
+        <a href="https://sidc.be/silso/" target="_blank" rel="noopener noreferrer" class="w-100 text-center">
+            <img src="https://sidc.be/silso/IMAGES/GRAPHICS/prediSC.png" id="silo-propagation-img"
+                alt="propagation trend" class="img-fluid rounded border border-white/10 shadow-lg">
+        </a>
+        <p class="text-muted small mt-3 mb-0">Source: SIDC - SILSO</p>
+    </div>
+
+    <!-- DX Spots per Month Chart -->
+    <div class="mb-5 bg-dark rounded glass-card spider_chart" id="chart-dx_spots_x_month"></div>
+
+    <!-- DX Spots Trend Chart -->
+    <div class="mb-5 bg-dark rounded glass-card spider_chart" id="chart-dx_spots_trend"></div>
+</div>
+
+<!-- Telnet Users and Nodes Section -->
+<div class="container-fluid">
+    <div class="mb-5 glass-card p-4">
+        <div class="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center mb-4 gap-3">
+            <div>
+                <h3 class="text-white mb-1" style="font-family: 'Outfit'; font-weight: 800;">LIVE CONNECTIONS</h3>
+                <p class="text-muted small mb-0">Real-time status of users and nodes connected to {{ mycallsign }}</p>
+            </div>
+            <div class="text-md-end">
+                <span class="text-white-50 extra-small text-uppercase tracking-wider">Last Refreshed</span><br>
+                <strong class="text-emerald">{{ last_updated if last_updated else "..." }}</strong>
+            </div>
+        </div>
+
+        <!-- KPI Cards Grid -->
+        <div class="d-flex flex-wrap justify-content-center justify-content-md-start mb-4">
+            <div class="kpi-card">
+                <span class="card-value">{{ who | selectattr('type', 'in', ['NODE DXSP', 'NODE CCCL']) | list | length }}</span>
+                <span class="card-text">Nodes</span>
+                <i class="bi bi-diagram-3-fill icon text-emerald"></i>
+            </div>
+            <div class="kpi-card">
+                <span class="card-value">{{ who | selectattr('type', 'equalto', 'USER EXT') | list | length }}</span>
+                <span class="card-text">Users</span>
+                <i class="bi bi-people-fill icon" style="color: #3b82f6;"></i>
+            </div>
+            <div class="kpi-card">
+                <span class="card-value">{{ who | selectattr('type', 'equalto', 'RBN  EXT') | list | length }}</span>
+                <span class="card-text">RBN</span>
+                <i class="bi bi-broadcast-pin icon" style="color: #8b5cf6;"></i>
+            </div>
+            <div class="kpi-card kpi-wide">
+                <span class="card-value text-nowrap" style="font-size: 1.25rem;">{{ dxspider_version if dxspider_version else "Unknown" }}</span>
+                <span class="card-text">DXSpider Version</span>
+                <i class="bi bi-terminal-fill icon text-white-50"></i>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-borderless table-sm text-responsive table-hover">
+                <thead id="telnet-thead">
+                    <tr>
+                        <th scope="col"><i class="bi bi-person-badge-fill me-2"></i>CALLSIGN</th>
+                        <th scope="col"><i class="bi bi-tag-fill me-2"></i>TYPE</th>
+                        <th scope="col"><i class="bi bi-clock-fill me-2"></i>STARTED</th>
+                        <th scope="col" class="d-none d-lg-table-cell"><i class="bi bi-person-fill me-2"></i>NAME</th>
+                        <th scope="col"><i class="bi bi-reception-4 me-2"></i>AVG RTT</th>
+                        <th scope="col" class="d-none d-lg-table-cell"><i class="bi bi-link-45deg me-2"></i>LINK</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for dict_item in who %}
+                    <tr>
+                        <td><strong class="callsign-text text-white">{{ dict_item["callsign"] }}</strong></td>
+                        <td>
+                            {% if 'NODE' in dict_item["type"] %}
+                                <span class="badge badge-node px-2 py-1">{{ dict_item["type"] }}</span>
+                            {% elif 'USER' in dict_item["type"] %}
+                                <span class="badge badge-user px-2 py-1">{{ dict_item["type"] }}</span>
+                            {% else %}
+                                <span class="badge badge-rbn px-2 py-1">{{ dict_item["type"] }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-white-50">{{ dict_item["started"] }}</td>
+                        <td class="d-none d-lg-table-cell">{{ dict_item["name"] }}</td>
+                        <td>
+                            {% if dict_item["average_rtt"] %}
+                                <span class="text-emerald fw-bold">{{ dict_item["average_rtt"] }}</span> <small class="text-muted">ms</small>
+                            {% else %}
+                                <span class="text-muted">-</span>
+                            {% endif %}
+                        </td>
+                        <td class="d-none d-lg-table-cell small text-muted">{{ dict_item["link"] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock contents %}
+
+{% block app_data %}
+{{ super() }}
+    var continents_cq = {{ continents["continents"] | tojson | safe }};
+    var band_frequencies = {{ bands["bands"] | tojson | safe }};
+{% endblock app_data %}
+
+{% block app_scripts %}
+{{ super() }}
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/echarts/5.5.0/echarts.min.js"
+    integrity="sha512-k37wQcV4v2h6jgYf5IUz1MoSKPpDs630XGSmCaCCOXxy2awgAWKHGZWr9nMyGgk3IOxA1NxdkN8r1JHgkUtMoQ=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script defer src="static/js/dev/plot.js"></script>
+{% endblock app_scripts %}

@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /csp-reports
+Disallow: /static/cfg/
+Disallow: /static/data/
+
+Sitemap: /sitemap.xml
