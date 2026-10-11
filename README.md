@@ -132,3 +132,9 @@ We have upgraded the license from GPLv3 to **AGPL v3.0** to ensure that the spir
 - **Sustainability**: Prevents "closed" forks of this web-based tool from being hosted as private services without contributing back.
 
 See the [LICENSE](LICENSE) file for more details. Original Author: [Corrado Gerbaldo - IU1BOW](https://www.qrz.com/db/IU1BOW).
+
+## Support
+
+If you find this project useful, please consider supporting it:
+
+[![Donate with PayPal](https://img.shields.io/badge/Donate-PayPal-blue.svg)](https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=9m2pju%40hamradio.my&currency_code=MYR&item_name=9M2PJU-Web-DX-Cluster)
